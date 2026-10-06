@@ -153,7 +153,8 @@ export async function apiFetch<T>(
       }
     } else if (responseData && typeof responseData === 'object' && 'error' in responseData) {
       const backendError = (responseData as { error?: { message?: unknown } }).error;
-      if (typeof backendError?.message === 'string') {
+      if (typeof backendError === 'string') { errorMsg = backendError; }
+      else if (typeof backendError?.message === 'string') {
         errorMsg = backendError.message;
       } else if (backendError?.message) {
         errorMsg = JSON.stringify(backendError.message);
@@ -224,8 +225,13 @@ class ApiClient {
   private healthIntervalId: number | null = null;
   private stateSyncTimerId: number | null = null;
   private stateRevision = 0;
+  private stateLoaded = false;
+  private stateDirty = false;
+  private stateBlocked = false;
   private stateSyncInFlight = false;
   private stateSyncPending = false;
+  private readInFlight = false;
+  private localChangeVersion = 0;
 
   constructor() {
     this.store = this.loadFromStorage();
@@ -239,6 +245,14 @@ class ApiClient {
         this.healthIntervalId = window.setInterval(() => {
           this.testConnection(false);
         }, 30000);
+        window.setInterval(() => {
+          if(document.visibilityState === 'visible') void this.refreshLiveData();
+        }, 2000);
+        window.addEventListener('focus', () => void this.refreshLiveData());
+        window.addEventListener('online', () => void this.testConnection(false));
+        document.addEventListener('visibilitychange', () => {
+          if(document.visibilityState === 'visible') void this.refreshLiveData();
+        });
       }
     }
   }
@@ -255,6 +269,12 @@ class ApiClient {
       backendActiveDashboard: null,
     };
 
+    if (!USE_MOCK_API) return {
+      vessels: [], berths: [], voyages: [], fuelOperations: [], paymentAccounts: [], paymentTransactions: [],
+      manufacturerQueue: [], operationalReadings: [], delayEvents: [], activities: [],
+      systemSettings: {postUnloadBerthBufferHours:1.5,arrivalOverdueGraceMinutes:30,paymentWarningThresholdHours:48,manufacturerEligibilityPercent:100,defaultSailingSpeedKnots:10,defaultLoadingRateTph:500,defaultUnloadingRateTph:600,unloadingRateUnitPreference:'TPH'},
+      connectionInfo: defaultConnection,
+    };
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
@@ -291,6 +311,8 @@ class ApiClient {
     }
     this.notify();
     if (syncBackend) {
+      this.localChangeVersion++;
+      this.stateDirty = true;
       this.queueBackendStateSync();
     }
   }
@@ -326,7 +348,7 @@ class ApiClient {
 
   private queueBackendStateSync(): void {
     if (
-      USE_MOCK_API ||
+      USE_MOCK_API || !this.stateLoaded || this.stateBlocked ||
       this.store.connectionInfo.apiHealth !== 'healthy' ||
       typeof window === 'undefined'
     ) {
@@ -346,7 +368,9 @@ class ApiClient {
       this.stateSyncPending = true;
       return;
     }
+    if (!this.stateLoaded || !this.stateDirty || this.stateBlocked) return;
     this.stateSyncInFlight = true;
+    this.stateDirty = false;
     try {
       const response = await apiFetch<BackendOperationalStateEnvelope>('/operations/state', {
         method: 'PUT',
@@ -356,8 +380,12 @@ class ApiClient {
         }),
       });
       this.stateRevision = response.revision;
+      this.store.connectionInfo.errorMessage = null;
+      this.notify();
     } catch (error) {
+      this.stateDirty = true;
       if (error instanceof ApiError && error.status === 409) {
+        this.stateBlocked = true;
         this.store.connectionInfo.errorMessage =
           'A newer operations update exists on the server. Refresh before editing again.';
         this.notify();
@@ -385,6 +413,7 @@ class ApiClient {
   }
 
   public resetDemoData(): void {
+    if (!USE_MOCK_API) throw new Error('Demo reset is disabled for database mode.');
     const baseline = getInitialDemoData();
     this.store = {
       ...baseline,
@@ -419,11 +448,6 @@ class ApiClient {
     });
 
     // 2. Find primary berth B01 expected release time from vessel berthed there
-    const v1Voyage = this.store.voyages.find(
-      (v) => v.assignedBerthId === 'B01' && (v.currentStage === 'UNLOADING' || v.currentStage === 'BERTHED_AT_VIGOR')
-    );
-    const b01Release = v1Voyage ? v1Voyage.expectedBerthRelease : undefined;
-
     // 3. Recalculate each voyage's downstream dependencies and berth conflict
     this.store.voyages = this.store.voyages.map((voyage) => {
       const fuelOp = this.store.fuelOperations.find((f) => f.voyageId === voyage.id);
@@ -441,7 +465,7 @@ class ApiClient {
         mfrPmt,
         fuelPmt,
         activeDelays,
-        voyage.id !== v1Voyage?.id ? b01Release : undefined,
+        this.store.voyages.find(other => other.id !== voyage.id && other.assignedBerthId === voyage.assignedBerthId && other.status === 'ACTIVE' && ['UNLOADING','BERTHED_AT_VIGOR'].includes(other.currentStage))?.expectedBerthRelease,
         this.store.systemSettings
       );
     });
@@ -529,13 +553,14 @@ class ApiClient {
       apiHealth: isApiHealthy ? 'healthy' : errorMsg ? 'offline' : 'unhealthy',
       databaseStatus: isDbConnected ? 'connected' : 'unavailable',
       lastChecked: now,
-      errorMessage: isDbConnected ? null : errorMsg,
+      errorMessage: this.stateDirty || this.stateBlocked ? this.store.connectionInfo.errorMessage : isDbConnected ? null : errorMsg,
       isCorsError: isCors,
       serviceName: apiHealthResp?.service || 'port-monitoring-api',
       backendActiveDashboard: this.store.connectionInfo.backendActiveDashboard,
     };
 
     if (isApiHealthy) {
+      if (this.stateDirty && !this.stateBlocked) await this.persistOperationalState();
       await this.syncFromBackend();
     }
 
@@ -543,112 +568,46 @@ class ApiClient {
     return this.store.connectionInfo;
   }
 
+  public async refreshLiveData(): Promise<void> {
+    if(USE_MOCK_API || !(localStorage.getItem('vigor_auth_token') || sessionStorage.getItem('vigor_auth_token'))) return;
+    if(this.stateDirty && !this.stateBlocked) await this.persistOperationalState();
+    await this.syncFromBackend();
+  }
+
   public async syncFromBackend(): Promise<void> {
+    if (this.readInFlight || this.stateSyncInFlight || this.stateDirty || this.stateBlocked) return;
+    this.readInFlight = true;
+    const version = this.localChangeVersion;
     try {
-      const [operationalState, vessels, berths, dashboard] = await Promise.allSettled([
-        apiFetch<BackendOperationalStateEnvelope>('/operations/state'),
-        apiFetch<any[]>('/vessels?limit=50'),
-        apiFetch<any[]>('/berths?limit=50'),
-        apiFetch<any>('/dashboard/active'),
-      ]);
-
-      const remoteState =
-        operationalState.status === 'fulfilled' ? operationalState.value : null;
-      if (remoteState?.state) {
-        const state = remoteState.state;
-        const arrayKeys: Array<keyof PersistedOperationalState> = [
-          'vessels',
-          'berths',
-          'voyages',
-          'fuelOperations',
-          'paymentAccounts',
-          'paymentTransactions',
-          'manufacturerQueue',
-          'operationalReadings',
-          'delayEvents',
-        ];
-        for (const key of arrayKeys) {
-          const value = state[key];
-          if (Array.isArray(value)) {
-            (this.store[key] as unknown[]) = value;
-          }
-        }
-        if (state.systemSettings && typeof state.systemSettings === 'object') {
-          this.store.systemSettings = {
-            ...this.store.systemSettings,
-            ...state.systemSettings,
-          };
-        }
-        this.stateRevision = remoteState.revision;
-      } else {
-        // First integrated run: enrich the frontend baseline with normalized
-        // backend master data, then establish the durable state document.
-        if (vessels.status === 'fulfilled' && Array.isArray(vessels.value) && vessels.value.length > 0) {
-          const existingVessels = this.store.vessels;
-          const additions = vessels.value
-            .map(adaptBackendVessel)
-            .filter(
-              (candidate) =>
-                !existingVessels.some(
-                  (current) =>
-                    current.id === candidate.id ||
-                    current.name.toLowerCase() === candidate.name.toLowerCase() ||
-                    (current.imo && candidate.imo && current.imo === candidate.imo)
-                )
-            );
-          this.store.vessels = [...existingVessels, ...additions];
-        }
-        if (berths.status === 'fulfilled' && Array.isArray(berths.value) && berths.value.length > 0) {
-          const existingBerths = this.store.berths;
-          const additions = berths.value
-            .map(adaptBackendBerth)
-            .filter(
-              (candidate) =>
-                !existingBerths.some(
-                  (current) =>
-                    current.id === candidate.id ||
-                    current.name.toLowerCase() === candidate.name.toLowerCase()
-                )
-            );
-          this.store.berths = [...existingBerths, ...additions];
-        }
-        if (operationalState.status === 'fulfilled') {
-          this.stateRevision = operationalState.value.revision;
-          await this.persistOperationalState();
-        }
+      const remote = await apiFetch<BackendOperationalStateEnvelope>('/operations/state', {cache:'no-store'});
+      // A read started before an edit must never overwrite that edit or a newer command.
+      if (!remote.state || version !== this.localChangeVersion || this.stateDirty || this.stateSyncInFlight || remote.revision < this.stateRevision) return;
+      for (const key of ['vessels','berths','voyages','fuelOperations','paymentAccounts','paymentTransactions','manufacturerQueue','operationalReadings','delayEvents','activities'] as const) {
+        if (Array.isArray(remote.state[key])) (this.store[key] as unknown[]) = remote.state[key] as unknown[];
       }
-
-      if (dashboard.status === 'fulfilled' && dashboard.value) {
-        this.store.connectionInfo.backendActiveDashboard = dashboard.value;
-
-        // Synchronize the normalized active visit into its matching full-cycle
-        // voyage. Keep the original demo fallback for a newly initialized site.
-        const activeDash = dashboard.value;
-        const activeVoyage =
-          this.store.voyages.find((v) => v.id === activeDash.visit_id) ||
-          this.store.voyages.find((v) => v.id === 'voy-01');
-        if (activeVoyage && activeDash.unloaded_t !== undefined) {
-          activeVoyage.unloadedTonnes = Number(activeDash.unloaded_t) || activeVoyage.unloadedTonnes;
-          if (activeDash.unloading_rate_tph) {
-            activeVoyage.unloadingRateTph = Number(activeDash.unloading_rate_tph);
-          }
-          if (activeDash.estimated_unload_finish) {
-            activeVoyage.forecastUnloadEnd = activeDash.estimated_unload_finish;
-          }
-          if (activeDash.expected_berth_release) {
-            activeVoyage.expectedBerthRelease = activeDash.expected_berth_release;
-          }
-          if (activeDash.berth_conflict !== undefined) {
-            activeVoyage.berthConflict = activeDash.berth_conflict;
-          }
-        }
-      }
-
+      this.store.systemSettings = {...this.store.systemSettings,...remote.state.systemSettings};
+      this.stateRevision = remote.revision;
+      this.stateLoaded = true;
+      this.store.connectionInfo.errorMessage = null;
+      this.store.connectionInfo.lastChecked = new Date().toISOString();
       this.recalculateAll();
       this.saveToStorage(false);
-    } catch {
-      // Sync error - keep local cache
-    }
+    } catch (error) {
+      this.store.connectionInfo.errorMessage = error instanceof ApiError && error.status === 401
+        ? 'Your session has expired. Sign out and sign in again to load current data.'
+        : 'Live data could not be refreshed. Displayed records may be out of date; reconnecting automatically.';
+      this.notify();
+    } finally {this.readInFlight = false;}
+  }
+
+  private async remoteActivity(path: string, body: unknown): Promise<any> {
+    while (this.stateSyncInFlight) await new Promise(resolve => setTimeout(resolve,25));
+    await this.persistOperationalState();
+    if (this.stateBlocked || this.stateDirty) throw new Error('Save or refresh outstanding changes before changing activities.');
+    this.localChangeVersion++;
+    const result = await apiFetch<any>(path, {method:'POST', body:JSON.stringify(body)});
+    await this.syncFromBackend();
+    return result;
   }
 
   // -------------------------------------------------------------------------
@@ -721,7 +680,7 @@ class ApiClient {
       this.store.voyages,
       this.store.paymentAccounts,
       v1Voyage?.expectedBerthRelease
-    );
+    ).map(alert=>({...alert,acknowledged:(this.store.systemSettings.acknowledgedAlertIds || []).includes(alert.id)}));
   }
 
   public getSettings(): SystemSettings {
@@ -735,24 +694,13 @@ class ApiClient {
   public addVessel(vessel: Omit<Vessel, 'id' | 'createdAt' | 'updatedAt'>): Vessel {
     const newVessel: Vessel = {
       ...vessel,
-      id: `v-${Date.now().toString().slice(-4)}`,
+      id: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
     this.store.vessels.push(newVessel);
     this.saveToStorage();
 
-    // Async sync to FastAPI backend if live
-    if (!USE_MOCK_API && this.store.connectionInfo.apiHealth === 'healthy') {
-      apiFetch('/vessels', {
-        method: 'POST',
-        body: JSON.stringify({
-          name: newVessel.name,
-          imo_reference: newVessel.imo || null,
-          capacity_t: newVessel.capacityT,
-        }),
-      }).catch(() => {});
-    }
 
     return newVessel;
   }
@@ -767,24 +715,89 @@ class ApiClient {
       };
       this.saveToStorage();
 
-      if (!USE_MOCK_API && this.store.connectionInfo.apiHealth === 'healthy') {
-        apiFetch(`/vessels/${id}`, {
-          method: 'PATCH',
-          body: JSON.stringify(updates),
-        }).catch(() => {});
-      }
+
     }
   }
 
-  public addBerth(berth: Omit<Berth, 'createdAt' | 'updatedAt'>): Berth {
-    const newBerth: Berth = {
-      ...berth,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+  public async addVoyage(input: Partial<Voyage>): Promise<Voyage> {
+    if (!input.vesselId || !input.voyageNumber?.trim()) throw new Error('Select a vessel and enter a voyage number.');
+    const now = new Date().toISOString();
+    const start = input.plannedUnloadStart || now;
+    const finish = input.forecastUnloadEnd || start;
+    const manufacturer = this.store.voyages.find(v => v.manufacturerName === input.manufacturerName);
+    const voyage: Voyage = {
+      id: crypto.randomUUID(), vesselId: input.vesselId, vesselName: this.store.vessels.find(v=>v.id===input.vesselId)?.name || '',
+      voyageNumber: input.voyageNumber, status:'PLANNED', origin:'',destination:'',cycleStart:now,
+      assignedBerthId:input.assignedBerthId || this.store.berths[0]?.id || '',cargoType:'Bulk Cement',
+      plannedCargoT:0,actualCargoT:0,unloadedTonnes:0,unloadingRateTph:this.store.systemSettings.defaultUnloadingRateTph,
+      plannedUnloadStart:start,plannedUnloadEnd:finish,forecastUnloadEnd:finish,expectedBerthRelease:finish,postUnloadBufferHours:1.5,
+      fuelRequired:false,outboundDeparturePlanned:finish,outboundDepartureForecast:finish,
+      manufacturerId:manufacturer?.manufacturerId || crypto.randomUUID(),manufacturerName:input.manufacturerName || 'Manufacturer',
+      manufacturerEtaPlanned:finish,manufacturerEtaForecast:finish,manufacturerSlotPlanned:finish,manufacturerSlotForecast:finish,
+      manufacturerLoadingEndForecast:finish,manufacturerDeparturePlanned:finish,manufacturerDepartureForecast:finish,
+      returnEtaPlanned:finish,returnEtaForecast:finish,currentStage:'PLANNED',health:'READY',risk:'UNKNOWN',currentBlocker:'NONE',blockerDescription:'',
+      berthConflict:false,predictedAnchorageWaitHours:0,createdAt:now,updatedAt:now,...input,
     };
-    this.store.berths.push(newBerth);
+    if (!USE_MOCK_API) {
+      await this.prepareBerthChange();this.localChangeVersion++;
+      const saved=await apiFetch<Voyage>('/voyages',{method:'POST',body:JSON.stringify(voyage)});
+      await this.syncFromBackend();return saved;
+    }
+    this.store.voyages.push(voyage); this.recalculateAll(); this.saveToStorage(); return voyage;
+  }
+
+  public async addFuelOperation(input: Partial<FuelOperation>): Promise<FuelOperation> {
+    const voyage = this.store.voyages.find(v=>v.id===input.voyageId && v.vesselId===input.vesselId);
+    if (!voyage) throw new Error('Create a voyage for this vessel before scheduling fuel.');
+    const now=new Date().toISOString();
+    const supplierId=this.store.fuelOperations.find(f=>f.supplierName===input.supplierName)?.supplierId || crypto.randomUUID();
+    const accountId=crypto.randomUUID();
+    const fuel: FuelOperation={id:crypto.randomUUID(),voyageId:voyage.id,vesselId:voyage.vesselId,supplierId,supplierName:input.supplierName || 'Supplier',fuelType:'MGO',quantity:0,unit:'MT',estimatedCost:0,currency:'USD',paymentAccountId:accountId,scheduledStart:now,scheduledEnd:now,status:'REQUESTED',invoiceNumber:'',createdAt:now,updatedAt:now,...input};
+    const account: PaymentAccount = {id:accountId,vesselId:fuel.vesselId,voyageId:fuel.voyageId,category:'FUEL',counterpartyId:supplierId,counterpartyName:fuel.supplierName,invoiceNumber:fuel.invoiceNumber,requiredAmount:fuel.estimatedCost,currency:fuel.currency,eligibilityThresholdType:'FULL',eligibilityThresholdValue:100,deadline:fuel.scheduledStart,status:'PENDING',isEligible:false,createdAt:now,updatedAt:now};
+    if (!USE_MOCK_API) {
+      await this.prepareBerthChange();this.localChangeVersion++;
+      await apiFetch('/fuel-operations',{method:'POST',body:JSON.stringify({fuel,account})});
+      await this.syncFromBackend();return fuel;
+    }
+    this.store.paymentAccounts.push(account);
+    this.store.fuelOperations.push(fuel);voyage.fuelRequired=true;voyage.fuelOperationId=fuel.id;
+    this.recalculateAll();this.saveToStorage();return fuel;
+  }
+
+  public acknowledgeAlert(id: string): void {
+    const ids = this.store.systemSettings.acknowledgedAlertIds || [];
+    this.store.systemSettings.acknowledgedAlertIds = [...new Set([...ids,id])];
     this.saveToStorage();
-    return newBerth;
+  }
+
+  public async addBerth(berth: Omit<Berth, 'createdAt' | 'updatedAt'>): Promise<Berth> {
+    if (this.store.berths.some(b => b.id.toLowerCase() === berth.id.trim().toLowerCase())) throw new Error('A berth with this ID already exists.');
+    if (!USE_MOCK_API) {
+      await this.prepareBerthChange();
+      this.localChangeVersion++;
+      await apiFetch('/berths', {method:'POST',body:JSON.stringify(berth)});
+      await this.syncFromBackend();
+      return this.store.berths.find(b => b.id === berth.id)!;
+    }
+    const row = {...berth,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
+    this.store.berths.push(row);this.saveToStorage();return row;
+  }
+
+  private async prepareBerthChange(): Promise<void> {
+    while (this.stateSyncInFlight) await new Promise(resolve => setTimeout(resolve,25));
+    await this.persistOperationalState();
+    if (this.stateBlocked || this.stateDirty) throw new Error('Refresh or save outstanding changes before changing berths.');
+  }
+
+  public async removeBerth(id: string): Promise<void> {
+    if (!USE_MOCK_API) {
+      await this.prepareBerthChange();
+      this.localChangeVersion++;
+      await apiFetch('/berths/'+encodeURIComponent(id),{method:'DELETE'});
+      await this.syncFromBackend();return;
+    }
+    if(this.store.voyages.some(v=>v.assignedBerthId===id)) throw new Error('This berth is linked to a voyage and cannot be removed.');
+    this.store.berths=this.store.berths.filter(b=>b.id!==id);this.saveToStorage();
   }
 
   public updateBerth(id: string, updates: Partial<Berth>): void {
@@ -804,7 +817,7 @@ class ApiClient {
   ): PaymentTransaction {
     const newTxn: PaymentTransaction = {
       ...txn,
-      id: `tx-${Date.now().toString().slice(-6)}`,
+      id: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
     };
     this.store.paymentTransactions.push(newTxn);
@@ -818,7 +831,7 @@ class ApiClient {
   ): Promise<OperationalReading> {
     const newReading: OperationalReading = {
       ...reading,
-      id: `rd-${Date.now().toString().slice(-6)}`,
+      id: crypto.randomUUID(),
     };
     this.store.operationalReadings.unshift(newReading);
 
@@ -842,36 +855,6 @@ class ApiClient {
     this.recalculateAll();
     this.saveToStorage();
 
-    // If connected to FastAPI, post the reading to the backend
-    if (!USE_MOCK_API && this.store.connectionInfo.apiHealth === 'healthy') {
-      try {
-        const visitId = reading.voyageId;
-        const res = await apiFetch<any>(`/visits/${visitId}/readings`, {
-          method: 'POST',
-          body: JSON.stringify({
-            recorded_at: reading.timestamp || new Date().toISOString(),
-            source: 'MANUAL',
-            unloaded_t: reading.unloadedTonnes,
-            observed_rate_tph: reading.observedRateTph,
-            unloading_status: 'ACTIVE',
-          }),
-        });
-
-        // The backend returns { reading, prediction, warnings }
-        if (res && res.prediction && voyage) {
-          if (res.prediction.estimated_unload_finish) {
-            voyage.forecastUnloadEnd = res.prediction.estimated_unload_finish;
-          }
-          if (res.prediction.expected_berth_release) {
-            voyage.expectedBerthRelease = res.prediction.expected_berth_release;
-          }
-          this.recalculateAll();
-          this.saveToStorage();
-        }
-      } catch {
-        // Fallback to local forecast
-      }
-    }
 
     return newReading;
   }
@@ -879,30 +862,14 @@ class ApiClient {
   public async addDelayEvent(delay: Omit<DelayEvent, 'id' | 'createdAt'>): Promise<DelayEvent> {
     const newDelay: DelayEvent = {
       ...delay,
-      id: `del-${Date.now().toString().slice(-6)}`,
+      id: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
     };
     this.store.delayEvents.unshift(newDelay);
     this.recalculateAll();
     this.saveToStorage();
 
-    if (!USE_MOCK_API && this.store.connectionInfo.apiHealth === 'healthy') {
-      try {
-        await apiFetch(`/visits/${delay.voyageId}/delays`, {
-          method: 'POST',
-          body: JSON.stringify({
-            start_time: delay.start,
-            end_time: delay.end || null,
-            category: delay.category,
-            cause: delay.description,
-            responsible_area: delay.area,
-            description: delay.description,
-          }),
-        });
-      } catch {
-        // Fallback
-      }
-    }
+
 
     return newDelay;
   }
@@ -1036,7 +1003,7 @@ class ApiClient {
 
   public getActivities(vesselId?: string): VesselActivity[] {
     if (!this.store.activities) {
-      this.store.activities = getInitialDemoData().activities;
+      this.store.activities = USE_MOCK_API ? getInitialDemoData().activities : [];
     }
     if (vesselId) {
       return this.store.activities
@@ -1054,6 +1021,7 @@ class ApiClient {
       overrideDependencyReason?: string;
     }
   ): Promise<{ activity: VesselActivity; conflict?: { currentActivity: VesselActivity; message: string } }> {
+    if (!USE_MOCK_API) return this.remoteActivity('/activities/'+activityId+'/start', {started_at:options?.startedAt,current_activity_resolution:options?.resolution,override_dependency_reason:options?.overrideDependencyReason});
     const act = this.store.activities.find((a) => a.id === activityId);
     if (!act) throw new Error(`Activity ${activityId} not found`);
 
@@ -1124,6 +1092,7 @@ class ApiClient {
   }
 
   public async stopActivity(activityId: string, reason: string, notes?: string): Promise<VesselActivity> {
+    if (!USE_MOCK_API) return this.remoteActivity('/activities/'+activityId+'/stop',{reason,notes});
     const act = this.store.activities.find((a) => a.id === activityId);
     if (!act) throw new Error(`Activity ${activityId} not found`);
 
@@ -1147,6 +1116,7 @@ class ApiClient {
   }
 
   public async resumeActivity(activityId: string, notes?: string): Promise<VesselActivity> {
+    if (!USE_MOCK_API) return this.remoteActivity('/activities/'+activityId+'/resume',{notes});
     const act = this.store.activities.find((a) => a.id === activityId);
     if (!act) throw new Error(`Activity ${activityId} not found`);
 
@@ -1173,6 +1143,7 @@ class ApiClient {
     activityId: string,
     options?: { actualEnd?: string; completionNotes?: string }
   ): Promise<{ activity: VesselActivity; nextReadyActivities?: VesselActivity[] }> {
+    if (!USE_MOCK_API) return this.remoteActivity('/activities/'+activityId+'/complete',{actual_end:options?.actualEnd,completion_notes:options?.completionNotes});
     const act = this.store.activities.find((a) => a.id === activityId);
     if (!act) throw new Error(`Activity ${activityId} not found`);
 
@@ -1216,6 +1187,7 @@ class ApiClient {
   }
 
   public async cancelActivity(activityId: string, reason: string, notes?: string): Promise<VesselActivity> {
+    if (!USE_MOCK_API) return this.remoteActivity('/activities/'+activityId+'/cancel',{reason,notes});
     const act = this.store.activities.find((a) => a.id === activityId);
     if (!act) throw new Error(`Activity ${activityId} not found`);
 
@@ -1237,6 +1209,7 @@ class ApiClient {
   }
 
   public async skipActivity(activityId: string, reason: string, notes?: string): Promise<VesselActivity> {
+    if (!USE_MOCK_API) return this.remoteActivity('/activities/'+activityId+'/skip',{reason,notes});
     const act = this.store.activities.find((a) => a.id === activityId);
     if (!act) throw new Error(`Activity ${activityId} not found`);
 
@@ -1258,6 +1231,7 @@ class ApiClient {
   }
 
   public async overrideActivityDependency(activityId: string, reason: string, notes?: string): Promise<VesselActivity> {
+    if (!USE_MOCK_API) return (await this.remoteActivity('/activities/'+activityId+'/override-dependency',{reason,notes})).activity;
     const act = this.store.activities.find((a) => a.id === activityId);
     if (!act) throw new Error(`Activity ${activityId} not found`);
 
@@ -1282,6 +1256,7 @@ class ApiClient {
     currentActivityId: string,
     completionNotes?: string
   ): Promise<{ completedActivity: VesselActivity; nextStartedActivity?: VesselActivity }> {
+    if (!USE_MOCK_API) return this.remoteActivity('/activities/'+currentActivityId+'/complete-and-start-next',{completion_notes:completionNotes});
     const current = this.store.activities.find((a) => a.id === currentActivityId);
     if (!current) throw new Error(`Activity ${currentActivityId} not found`);
 
@@ -1302,6 +1277,7 @@ class ApiClient {
   }
 
   public async moveActivity(activityId: string, direction: 'UP' | 'DOWN'): Promise<VesselActivity[]> {
+    if (!USE_MOCK_API) { await this.remoteActivity('/activities/'+activityId+'/move',{direction}); return this.store.activities; }
     const act = this.store.activities.find((a) => a.id === activityId);
     if (!act) return this.store.activities;
 
@@ -1336,6 +1312,7 @@ class ApiClient {
   }
 
   public async addActivity(activity: Partial<VesselActivity>): Promise<VesselActivity> {
+    if (!USE_MOCK_API) return this.remoteActivity('/activities',activity);
     const id = activity.id || `act-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
     const now = new Date().toISOString();
 

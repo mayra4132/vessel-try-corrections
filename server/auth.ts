@@ -29,7 +29,7 @@ export interface ActivityLog {
 }
 
 const REQUIRED_DOMAIN = '@turkysgroup.co.tz';
-const AUTH_SECRET = process.env.AUTH_SECRET || 'vigor-turkys-smart-port-ops-sec-key-2025';
+const AUTH_SECRET = process.env.AUTH_SECRET || process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 
 // Pre-seeded fallback users (Default password for all: Turkys@2025)
 const SALT_ROUNDS = 10;
@@ -149,7 +149,8 @@ export function logActivity(userEmail: string, action: string, targetEntity: str
   }
 }
 
-export function getActivityLogs(): ActivityLog[] {
+export async function getActivityLogs(): Promise<ActivityLog[]> {
+  if (dbManager.isUsingMySQL()) return dbManager.executeQuery<ActivityLog>('SELECT id,user_id AS userId,user_email AS userEmail,action,target_entity AS targetEntity,target_id AS targetId,details,created_at AS createdAt FROM activity_logs ORDER BY created_at DESC LIMIT 500');
   return [...activityLogs];
 }
 
@@ -218,10 +219,11 @@ export async function findUserByEmail(email: string): Promise<User | null> {
         };
       }
     } catch (err) {
-      console.warn('[DB User Query fallback to memory]', err);
+      throw err;
     }
   }
 
+  if (dbManager.isUsingMySQL()) return null;
   const found = fallbackUsers.find((u) => u.email.toLowerCase() === normalized);
   return found || null;
 }
@@ -246,7 +248,7 @@ export async function listAllUsers(): Promise<Omit<User, 'passwordHash'>[]> {
         lastLoginAt: r.last_login_at,
       }));
     } catch (err) {
-      console.warn('[DB User List fallback to memory]', err);
+      throw err;
     }
   }
 
@@ -343,7 +345,7 @@ export async function registerUser(
     passwordHash: hashed,
   };
 
-  fallbackUsers.push(newUser);
+  if (!dbManager.isUsingMySQL()) fallbackUsers.push(newUser);
 
   if (dbManager.isUsingMySQL()) {
     try {
@@ -352,7 +354,7 @@ export async function registerUser(
         [newUser.id, newUser.email, newUser.passwordHash, newUser.fullName, newUser.department, newUser.role, newUser.status]
       );
     } catch (err) {
-      console.warn('[DB User Insert Error]', err);
+      throw err;
     }
   }
 
@@ -372,7 +374,9 @@ export async function registerUser(
  * Update user status (Admin only)
  */
 export async function updateUserStatus(userId: string, status: UserStatus, adminEmail: string): Promise<User> {
-  const user = fallbackUsers.find((u) => u.id === userId);
+  const user = dbManager.isUsingMySQL()
+    ? (await dbManager.executeQuery<any>('SELECT id,email,full_name AS fullName,department,role,status,created_at AS createdAt FROM users WHERE id=?', [userId]))[0]
+    : fallbackUsers.find((u) => u.id === userId);
   if (!user) throw new Error('User not found');
 
   user.status = status;
@@ -390,7 +394,9 @@ export async function updateUserStatus(userId: string, status: UserStatus, admin
  * Update user role (Admin only)
  */
 export async function updateUserRole(userId: string, role: UserRole, adminEmail: string): Promise<User> {
-  const user = fallbackUsers.find((u) => u.id === userId);
+  const user = dbManager.isUsingMySQL()
+    ? (await dbManager.executeQuery<any>('SELECT id,email,full_name AS fullName,department,role,status,created_at AS createdAt FROM users WHERE id=?', [userId]))[0]
+    : fallbackUsers.find((u) => u.id === userId);
   if (!user) throw new Error('User not found');
 
   user.role = role;

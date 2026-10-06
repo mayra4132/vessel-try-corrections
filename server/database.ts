@@ -1,8 +1,9 @@
+import 'dotenv/config';
 import mysql, { Pool, PoolOptions } from 'mysql2/promise';
 
 export interface DatabaseStatus {
   connected: boolean;
-  provider: 'cPanel MySQL' | 'In-Memory Resilient Engine';
+  provider: 'MySQL / MariaDB' | 'In-Memory Resilient Engine';
   host: string;
   database: string;
   user: string;
@@ -50,6 +51,8 @@ class DatabaseManager {
           queueLimit: 0,
           connectTimeout: 5000,
           dateStrings: true,
+          decimalNumbers: true,
+          timezone: 'Z',
         };
 
         this.pool = mysql.createPool(poolConfig);
@@ -87,7 +90,7 @@ class DatabaseManager {
       const [rows] = await this.pool.query('SELECT 1 as ping, NOW() as server_time');
       this.lastStatus = {
         connected: true,
-        provider: 'cPanel MySQL',
+        provider: 'MySQL / MariaDB',
         host,
         database,
         user,
@@ -98,11 +101,11 @@ class DatabaseManager {
       const errMsg = (err as Error)?.message || 'Connection refused or timed out';
       this.lastStatus = {
         connected: false,
-        provider: 'In-Memory Resilient Engine',
+        provider: 'MySQL / MariaDB',
         host,
         database,
         user,
-        message: `cPanel MySQL connection failed (${errMsg}). Operating via resilient fallback.`,
+        message: `Database connection failed (${errMsg}). Database writes are unavailable; no fallback is used.`,
         lastChecked: now,
       };
     }
@@ -111,10 +114,14 @@ class DatabaseManager {
   }
 
   public async executeQuery<T = any>(sql: string, params: unknown[] = []): Promise<T[]> {
-    if (this.pool && this.lastStatus.connected) {
+    if (this.pool) {
       try {
-        const [results] = await this.pool.query(sql, params);
-        return results as T[];
+        const connection = await this.pool.getConnection();
+        try {
+          await connection.query("SET time_zone = '+00:00'");
+          const [results] = await connection.query(sql, params);
+          return results as T[];
+        } finally { connection.release(); }
       } catch (err: unknown) {
         console.error('[DB Query Error]', err);
         throw err;
@@ -124,7 +131,7 @@ class DatabaseManager {
   }
 
   public isUsingMySQL(): boolean {
-    return this.lastStatus.connected && this.pool !== null;
+    return this.isConfigured;
   }
 
   public getPool(): Pool | null {

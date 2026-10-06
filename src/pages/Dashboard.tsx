@@ -84,6 +84,11 @@ export function Dashboard({
   // V3 Berth conflict
   const v3Voyage = voyages.find((v) => v.vesselId === 'v-03');
 
+  if (!vessels.length || !voyages.length) return <div className="space-y-4">
+    <PageHeader title="Operations Dashboard" description="No vessel operations yet." />
+    <p>Add vessels and voyages before viewing operational metrics.</p>
+  </div>;
+
   return (
     <div className="space-y-6 pb-12">
       {/* Page Header */}

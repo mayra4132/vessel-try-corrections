@@ -65,7 +65,7 @@ export function Admin() {
 
   // Calculation parameters
   const [bufferHours, setBufferHours] = useState(String(systemSettings.postUnloadBerthBufferHours));
-  const [paymentThreshold, setPaymentThreshold] = useState(String(systemSettings.paymentEligibilityThresholdPercent));
+  const [paymentThreshold, setPaymentThreshold] = useState(String(systemSettings.manufacturerEligibilityPercent));
   const [savedSuccess, setSavedSuccess] = useState(false);
 
   // User management state
@@ -245,7 +245,7 @@ export function Admin() {
     e.preventDefault();
     api.updateSystemSettings({
       postUnloadBerthBufferHours: Number(bufferHours) || 1.5,
-      paymentEligibilityThresholdPercent: Number(paymentThreshold) || 100,
+      manufacturerEligibilityPercent: Number(paymentThreshold) || 100,
     });
     setSavedSuccess(true);
     setTimeout(() => setSavedSuccess(false), 3000);

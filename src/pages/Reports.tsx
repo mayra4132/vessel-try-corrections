@@ -27,6 +27,11 @@ export function Reports() {
   const avgTurnaroundHours = 18.5;
   const berthOccupancyRate = 87.4;
 
+  if (!vessels.length || !voyages.length) return <div className="space-y-4">
+    <PageHeader title="Operations Reports" description="No vessel operations yet." />
+    <p>Add vessels and voyages before viewing operational reports.</p>
+  </div>;
+
   return (
     <div className="space-y-6 pb-12">
       <PageHeader

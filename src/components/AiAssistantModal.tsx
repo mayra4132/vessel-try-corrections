@@ -48,7 +48,7 @@ export function AiAssistantModal({
   // 4 suggested prompt chips (Requirement 10)
   const quickPrompts = [
     'What needs attention right now?',
-    'Why is MV VIGOR 03 delayed?',
+    'Are any vessels delayed?',
     'Are we meeting today’s production target?',
     'What’s the current berth situation?',
   ];
@@ -83,6 +83,10 @@ export function AiAssistantModal({
     const userMsg: AssistantMessage = { sender: 'USER', text: q };
     setMessages((prev) => [...prev, userMsg]);
     if (!textToSend) setInput('');
+    if (!vessels.length || !voyages.length) {
+      setMessages(prev => [...prev, { sender: 'ASSISTANT', text: 'No vessel operations have been recorded yet. Add vessels and voyages before requesting an operational assessment.' }]);
+      return;
+    }
     setIsThinking(true);
 
     // Build conversation history for pronoun and contextual follow-ups

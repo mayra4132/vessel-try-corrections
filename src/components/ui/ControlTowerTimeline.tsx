@@ -179,7 +179,7 @@ export function ControlTowerTimeline({
                             style={getBlockStyle(voyage.actualUnloadStart || voyage.plannedUnloadStart, voyage.forecastUnloadEnd)}
                             title={`Unloading bulk cement: Forecast finish ${formatDateTime(voyage.forecastUnloadEnd)}`}
                           >
-                            UNLOAD 72% ({formatTime(voyage.forecastUnloadEnd)})
+                            UNLOAD {voyage.actualCargoT > 0 ? Math.round(100 * voyage.unloadedTonnes / voyage.actualCargoT) + '%' : '?'} ({formatTime(voyage.forecastUnloadEnd)})
                           </div>
                         )}
 

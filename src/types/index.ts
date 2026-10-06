@@ -349,6 +349,7 @@ export interface Alert {
 }
 
 export interface SystemSettings {
+  acknowledgedAlertIds?: string[];
   postUnloadBerthBufferHours: number;
   arrivalOverdueGraceMinutes: number;
   paymentWarningThresholdHours: number;

@@ -28,42 +28,47 @@ export function Fuel({ onSelectVessel, onNavigateToPayments }: FuelProps) {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
 
   // New Fuel Form
-  const [vesselId, setVesselId] = useState('v-02');
+  const [vesselId, setVesselId] = useState('');
   const [fuelType, setFuelType] = useState<'MGO' | 'VLSFO' | 'LSMGO'>('MGO');
   const [quantity, setQuantity] = useState('120');
   const [supplier, setSupplier] = useState('TotalEnergies Marine Fuels');
   const [cost, setCost] = useState('110000');
   const [location, setLocation] = useState<'ALONGSIDE_BERTH' | 'ANCHORAGE_BARGE' | 'SUPPLIER_TERMINAL'>('ALONGSIDE_BERTH');
 
+  const [error,setError]=useState('');
+  const [saving,setSaving]=useState(false);
+  const eligibleVessels=vessels.filter(v=>voyages.some(trip=>trip.vesselId===v.id&&trip.status==='ACTIVE'));
   const totalFuelCostUsd = fuelOperations.reduce((acc, f) => acc + f.estimatedCost, 0);
 
-  const handleScheduleFuel = (e: React.FormEvent) => {
+  const handleScheduleFuel = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError('');setSaving(true);
+    try {
     const selVoyage = voyages.find((v) => v.vesselId === vesselId && v.status === 'ACTIVE');
 
+    if(!selVoyage)throw new Error('Create an active voyage for this vessel before scheduling fuel.');
+    if(Number(quantity)<=0||Number(cost)<0||!supplier.trim())throw new Error('Enter a supplier, positive quantity and non-negative cost.');
     const now = new Date();
     const start = new Date(now.getTime() + 18 * 3600000).toISOString();
     const end = new Date(now.getTime() + 21 * 3600000).toISOString();
 
-    api.addFuelOperation({
+    await api.addFuelOperation({
       vesselId,
       voyageId: selVoyage?.id,
       fuelType,
-      quantity: Number(quantity) || 100,
+      quantity: Number(quantity),
       supplierName: supplier,
-      estimatedCost: Number(cost) || 100000,
+      estimatedCost: Number(cost),
       currency: 'USD',
       invoiceNumber: `FO-INV-2026-${Math.floor(100 + Math.random() * 900)}`,
-      paymentStatus: 'PAID',
       scheduledStart: start,
       scheduledEnd: end,
-      deliveryLocation: location,
       status: 'SCHEDULED',
-      requiredBeforeDeparture: true,
-      notes: 'Scheduled alongside delivery via bunker barge.',
+      notes: `Delivery location: ${location}`,
     });
 
     setIsAddModalOpen(false);
+    }catch(e){setError(e instanceof Error?e.message:'Unable to save fuel order.');}finally{setSaving(false);}
   };
 
   return (
@@ -74,7 +79,7 @@ export function Fuel({ onSelectVessel, onNavigateToPayments }: FuelProps) {
         description="Coordinates bunker fuel procurement, supplier barge appointments, and post-discharge departure readiness."
       >
         <button
-          onClick={() => setIsAddModalOpen(true)}
+          onClick={() => {setVesselId(eligibleVessels[0]?.id||'');setError('');setIsAddModalOpen(true);}}
           className="px-3.5 py-2 text-xs font-semibold rounded-lg bg-[#0C9349] hover:bg-[#0A7A3D] text-white flex items-center gap-1.5 transition shadow-xs"
         >
           <Plus className="w-4 h-4" />
@@ -87,7 +92,7 @@ export function Fuel({ onSelectVessel, onNavigateToPayments }: FuelProps) {
         <KpiCard
           label="Active Bunkering Ops"
           value={fuelOperations.length}
-          subtext="V01 alongside, V03 scheduled"
+          subtext="Recorded fuel orders"
           icon={<FuelIcon className="w-5 h-5" />}
           variant="teal"
         />
@@ -99,15 +104,15 @@ export function Fuel({ onSelectVessel, onNavigateToPayments }: FuelProps) {
         />
         <KpiCard
           label="Preferred Delivery"
-          value="Alongside B01"
+          value="Per order"
           subtext="Bunkering while line purge runs"
           icon={<Ship className="w-5 h-5" />}
           variant="success"
         />
         <KpiCard
           label="Supplier Readiness"
-          value="100% On-Time"
-          subtext="TotalEnergies & Puma Energy"
+          value="Not assessed"
+          subtext="Based on recorded delivery updates"
           icon={<CheckCircle2 className="w-5 h-5" />}
           variant="success"
         />
@@ -215,15 +220,15 @@ export function Fuel({ onSelectVessel, onNavigateToPayments }: FuelProps) {
         title="Schedule Fuel Bunkering Operation"
         subtitle="Book bunkering window and supplier barge delivery."
       >
-        <form onSubmit={handleScheduleFuel} className="space-y-4 text-xs">
+        <form onSubmit={handleScheduleFuel} className="space-y-4 text-xs">{error && <p role="alert" className="text-red-700">{error}</p>}{!eligibleVessels.length && <p>Create a voyage first to link the fuel order to a vessel.</p>}
           <div>
             <label className="block font-semibold text-[#14181A] mb-1">Target Fleet Vessel *</label>
             <select
-              value={vesselId}
+              aria-label="Fuel Vessel" required value={vesselId}
               onChange={(e) => setVesselId(e.target.value)}
               className="w-full p-2 bg-[#F7F5F0] border border-[#E1DED4] rounded-lg"
             >
-              {vessels.map((v) => (
+              {eligibleVessels.map((v) => (
                 <option key={v.id} value={v.id}>
                   {v.name} ({v.reference})
                 </option>
@@ -284,7 +289,7 @@ export function Fuel({ onSelectVessel, onNavigateToPayments }: FuelProps) {
               onChange={(e) => setLocation(e.target.value as any)}
               className="w-full p-2 bg-[#F7F5F0] border border-[#E1DED4] rounded-lg"
             >
-              <option value="ALONGSIDE_BERTH">Alongside Berth B01 (Post-Discharge Window)</option>
+              <option value="ALONGSIDE_BERTH">Alongside assigned berth</option>
               <option value="ANCHORAGE_BARGE">Zanzibar Outer Anchorage (Barge)</option>
               <option value="SUPPLIER_TERMINAL">Supplier Terminal Wharf</option>
             </select>
@@ -299,10 +304,10 @@ export function Fuel({ onSelectVessel, onNavigateToPayments }: FuelProps) {
               Cancel
             </button>
             <button
-              type="submit"
+              type="submit" disabled={saving||!eligibleVessels.length}
               className="px-4 py-2 rounded-lg bg-[#0C9349] hover:bg-[#0A7A3D] text-white font-semibold shadow-xs"
             >
-              Confirm Bunkering Order
+              {saving?'Saving...':'Confirm Bunkering Order'}
             </button>
           </div>
         </form>

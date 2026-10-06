@@ -1,3 +1,4 @@
+import { api } from '../api/client';
 import React, { createContext, useContext, useState, useEffect } from 'react';
 
 export type UserRole = 'Admin' | 'Management' | 'Operations' | 'Viewer';
@@ -113,6 +114,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setToken(data.token);
       localStorage.setItem(STORAGE_KEY_TOKEN, data.token);
       localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(data.user));
+      await api.testConnection();
       return true;
     } catch (err: any) {
       setError(err.message || 'Login failed. Please check credentials.');

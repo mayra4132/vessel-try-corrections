@@ -15,16 +15,24 @@ interface VoyagesProps {
 }
 
 export function Voyages({ onSelectVessel }: VoyagesProps) {
-  const { voyages, vessels, api } = useAppData();
+  const { voyages, vessels, berths, systemSettings, api } = useAppData();
   const [filter, setFilter] = useState<'ALL' | 'ACTIVE' | 'COMPLETED'>('ALL');
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
 
   // New Voyage form
-  const [vesselId, setVesselId] = useState('v-01');
-  const [voyageNum, setVoyageNum] = useState('VG-2026-085');
-  const [origin, setOrigin] = useState('Tanga Port');
-  const [destination, setDestination] = useState('VIGOR Berth B01 (Zanzibar)');
-  const [plannedCargo, setPlannedCargo] = useState('9500');
+  const [vesselId, setVesselId] = useState('');
+  const [voyageNum, setVoyageNum] = useState('');
+  const [origin, setOrigin] = useState('');
+  const [destination, setDestination] = useState('');
+  const [plannedCargo, setPlannedCargo] = useState('');
+
+  const [berthId,setBerthId]=useState('');
+  const [arrival,setArrival]=useState('');
+  const [rate,setRate]=useState('');
+  const [manufacturer,setManufacturer]=useState('');
+  const [stage,setStage]=useState<'PLANNED'|'UNLOADING'>('PLANNED');
+  const [error,setError]=useState('');
+  const [saving,setSaving]=useState(false);
 
   const filteredVoyages = voyages.filter((v) => {
     if (filter === 'ACTIVE') return v.status === 'ACTIVE';
@@ -32,44 +40,24 @@ export function Voyages({ onSelectVessel }: VoyagesProps) {
     return true;
   });
 
-  const handleCreateVoyage = (e: React.FormEvent) => {
-    e.preventDefault();
-    const selVessel = vessels.find((v) => v.id === vesselId);
-    if (!selVessel) return;
-
-    const now = new Date();
-    const plannedUnload = new Date(now.getTime() + 16 * 3600000).toISOString();
-    const mfrEta = new Date(now.getTime() + 32 * 3600000).toISOString();
-
-    api.addVoyage({
-      vesselId: selVessel.id,
-      vesselName: selVessel.name,
-      voyageNumber: voyageNum.trim(),
-      status: 'ACTIVE',
-      currentStage: 'UNLOADING',
-      cargoType: 'Bulk Portland Cement CEM I 42.5R',
-      plannedCargoT: Number(plannedCargo) || 9500,
-      actualCargoT: Number(plannedCargo) || 9500,
-      unloadedTonnes: 0,
-      unloadingRateTph: 600,
-      plannedUnloadStart: now.toISOString(),
-      plannedUnloadEnd: plannedUnload,
-      forecastUnloadEnd: plannedUnload,
-      postUnloadBufferHours: 1.5,
-      expectedBerthRelease: new Date(new Date(plannedUnload).getTime() + 1.5 * 3600000).toISOString(),
-      assignedBerthId: 'B01',
-      manufacturerName: 'Tanga Cement PLC (Mamba Wharf)',
-      manufacturerEtaPlanned: mfrEta,
-      manufacturerEtaForecast: mfrEta,
-      manufacturerSlotForecast: new Date(new Date(mfrEta).getTime() + 12 * 3600000).toISOString(),
-      origin: origin.trim(),
-      destination: destination.trim(),
-      health: 'HEALTHY',
-      risk: 'LOW',
-      currentBlocker: 'NONE',
-    });
-
-    setIsAddModalOpen(false);
+  const handleCreateVoyage = async (e: React.FormEvent) => {
+    e.preventDefault();setError('');setSaving(true);
+    try {
+      const vessel=vessels.find(v=>v.id===vesselId),berth=berths.find(b=>b.id===berthId);
+      if(!vessel||!berth)throw new Error('Select a vessel and berth.');
+      const cargo=Number(plannedCargo),unloadRate=Number(rate);
+      if(cargo<=0||cargo>vessel.capacityT)throw new Error('Cargo must be positive and within vessel capacity.');
+      if(unloadRate<=0)throw new Error('Enter a positive unloading rate.');
+      const start=new Date(arrival).toISOString();
+      const end=new Date(Date.parse(start)+cargo/unloadRate*3600000).toISOString();
+      await api.addVoyage({vesselId,vesselName:vessel.name,voyageNumber:voyageNum.trim(),assignedBerthId:berthId,
+        origin:origin.trim(),destination:destination.trim()||berth.location||berth.name,manufacturerName:manufacturer.trim()||'Not specified',
+        status:'ACTIVE',currentStage:stage,cargoType:'Bulk Cement',plannedCargoT:cargo,actualCargoT:cargo,
+        unloadedTonnes:0,unloadingRateTph:unloadRate,plannedUnloadStart:start,plannedUnloadEnd:end,forecastUnloadEnd:end,
+        actualUnloadStart:stage==='UNLOADING'?start:undefined,postUnloadBufferHours:systemSettings.postUnloadBerthBufferHours,
+        expectedBerthRelease:new Date(Date.parse(end)+systemSettings.postUnloadBerthBufferHours*3600000).toISOString(),health:'READY',risk:'ON_TRACK',currentBlocker:'NONE'});
+      setIsAddModalOpen(false);
+    }catch(e){setError(e instanceof Error?e.message:'Unable to save voyage.');}finally{setSaving(false);}
   };
 
   return (
@@ -80,7 +68,7 @@ export function Voyages({ onSelectVessel }: VoyagesProps) {
         description="Comprehensive cycle history across Zanzibar discharge, coastal transit, manufacturer loading, and return logistics."
       >
         <button
-          onClick={() => setIsAddModalOpen(true)}
+          onClick={() => {setVesselId(vessels[0]?.id||'');setBerthId(berths[0]?.id||'');setRate(String(berths[0]?.defaultUnloadingRate||600));setVoyageNum('');setPlannedCargo('');setArrival(new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,16));setError('');setIsAddModalOpen(true);}}
           className="px-3.5 py-2 text-xs font-semibold rounded-lg bg-[#0C9349] hover:bg-[#0A7A3D] text-white flex items-center gap-1.5 transition shadow-xs"
         >
           <Plus className="w-4 h-4" />
@@ -146,7 +134,7 @@ export function Voyages({ onSelectVessel }: VoyagesProps) {
                   </span>
                 </div>
                 <div>
-                  <span className="text-[10px] text-[#3F4A47] uppercase block font-sans">Berth B01 Release</span>
+                  <span className="text-[10px] text-[#3F4A47] uppercase block font-sans">Berth {voyage.assignedBerthId} Release</span>
                   <span className="font-semibold text-[#14181A]">
                     {formatTime(voyage.expectedBerthRelease)}
                   </span>
@@ -171,14 +159,21 @@ export function Voyages({ onSelectVessel }: VoyagesProps) {
         subtitle="Schedule a new round-trip cement rotation cycle."
       >
         <form onSubmit={handleCreateVoyage} className="space-y-4 text-xs">
+          {error && <p role="alert" className="text-red-700">{error}</p>}
+          {(!vessels.length||!berths.length) && <p role="alert">Add a vessel and berth before creating a voyage.</p>}
+          <label className="block">Assigned Berth<select required aria-label="Assigned Berth" value={berthId} onChange={e=>{setBerthId(e.target.value);setRate(String(berths.find(b=>b.id===e.target.value)?.defaultUnloadingRate||''));}} className="w-full border p-2 rounded"><option value="">Select berth</option>{berths.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}</select></label>
+          <label className="block">Planned Arrival<input required type="datetime-local" value={arrival} onChange={e=>setArrival(e.target.value)} className="w-full border p-2 rounded"/></label>
+          <label className="block">Unloading Rate (t/h)<input required type="number" min="0.01" step="any" value={rate} onChange={e=>setRate(e.target.value)} className="w-full border p-2 rounded"/></label>
+          <label className="block">Current Stage<select value={stage} onChange={e=>setStage(e.target.value as 'PLANNED'|'UNLOADING')} className="w-full border p-2 rounded"><option value="PLANNED">Planned arrival</option><option value="UNLOADING">Currently unloading</option></select></label>
+          <label className="block">Manufacturer<input value={manufacturer} onChange={e=>setManufacturer(e.target.value)} className="w-full border p-2 rounded"/></label>
           <div>
             <label className="block font-semibold text-[#14181A] mb-1">Select Vessel *</label>
             <select
-              value={vesselId}
+              required aria-label="Select Vessel" value={vesselId}
               onChange={(e) => setVesselId(e.target.value)}
               className="w-full p-2 bg-[#F7F5F0] border border-[#E1DED4] rounded-lg"
             >
-              {vessels.map((v) => (
+              <option value="">Select vessel</option>{vessels.map((v) => (
                 <option key={v.id} value={v.id}>
                   {v.name} ({v.reference})
                 </option>
@@ -192,7 +187,7 @@ export function Voyages({ onSelectVessel }: VoyagesProps) {
               <input
                 type="text"
                 required
-                value={voyageNum}
+                aria-label="Voyage Number" value={voyageNum}
                 onChange={(e) => setVoyageNum(e.target.value)}
                 className="w-full p-2 bg-[#F7F5F0] border border-[#E1DED4] rounded-lg font-mono"
               />
@@ -202,7 +197,7 @@ export function Voyages({ onSelectVessel }: VoyagesProps) {
               <input
                 type="number"
                 required
-                value={plannedCargo}
+                min="0.01" step="any" aria-label="Planned Cargo" value={plannedCargo}
                 onChange={(e) => setPlannedCargo(e.target.value)}
                 className="w-full p-2 bg-[#F7F5F0] border border-[#E1DED4] rounded-lg font-mono"
               />
@@ -239,10 +234,10 @@ export function Voyages({ onSelectVessel }: VoyagesProps) {
               Cancel
             </button>
             <button
-              type="submit"
+              type="submit" disabled={saving||!vessels.length||!berths.length}
               className="px-4 py-2 rounded-lg bg-[#0C9349] hover:bg-[#0A7A3D] text-white font-semibold shadow-xs"
             >
-              Start Voyage
+              {saving?'Saving...':'Start Voyage'}
             </button>
           </div>
         </form>

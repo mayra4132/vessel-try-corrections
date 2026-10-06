@@ -69,6 +69,10 @@ Comprehensive step-by-step manuals are included in the repository:
 
 ---
 
+## Database persistence
+
+The operational API now saves to the relational MySQL/MariaDB tables. See [Database integration and local setup](docs/DATABASE_INTEGRATION.md) for configuration, explicit demo initialization, and restart/concurrency tests. Use `.env` for server credentials. Do not use the legacy `database/demo_seed.sql` with the new schema.
+
 ## 5. Local Development Setup
 
 ### Prerequisites

@@ -1,3 +1,4 @@
+import { databaseRouter } from './server/databaseRouter';
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
@@ -25,7 +26,7 @@ import {
 import { activityService } from './server/services/activityService';
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT || 3000);
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
@@ -364,16 +365,18 @@ const apiRouter = express.Router();
 
 // Authentication middleware to populate req.user if Bearer token is provided
 apiRouter.use((req: Request, res: Response, next: NextFunction) => {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.substring(7);
-    const decoded = verifyToken(token);
-    if (decoded) {
-      (req as any).user = decoded;
-    }
-  }
-  next();
+  const token = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : undefined;
+  const decoded = token ? verifyToken(token) : null;
+  if (!decoded) { next(); return; }
+  if (!dbManager.isUsingMySQL()) { (req as any).user = decoded; next(); return; }
+  dbManager.executeQuery<any>('SELECT email,role,status FROM users WHERE id=? LIMIT 1',[decoded.uid]).then(rows=>{
+    const user=rows[0];
+    if (!user || user.status !== 'Active') {res.status(401).json({error:'Account is no longer active. Please sign in again.'});return;}
+    (req as any).user={...decoded,email:user.email,role:user.role};next();
+  }).catch(()=>res.status(503).json({error:'Authentication database unavailable.'}));
 });
+
+apiRouter.use(databaseRouter);
 
 // Helper auth guards
 function requireAuth(req: Request, res: Response, next: NextFunction) {
@@ -509,8 +512,8 @@ apiRouter.put('/users/:id/role', requireRole(['Admin']), async (req: Request, re
 });
 
 // GET /api/v1/activity-logs (Admin & Operations)
-apiRouter.get('/activity-logs', requireRole(['Admin', 'Operations', 'Management']), (req: Request, res: Response) => {
-  res.json(getActivityLogs());
+apiRouter.get('/activity-logs', requireRole(['Admin', 'Operations', 'Management']), async (req: Request, res: Response) => {
+  try { res.json(await getActivityLogs()); } catch { res.status(503).json({error:'Audit database unavailable'}); }
 });
 
 // ---------------------------------------------------------------------------

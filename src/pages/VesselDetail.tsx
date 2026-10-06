@@ -40,6 +40,7 @@ import {
 interface VesselDetailProps {
   vesselId: string;
   onBack: () => void;
+  onNavigateToVoyages: () => void;
   onNavigateToPayments: () => void;
   onNavigateToBerths: () => void;
 }
@@ -47,6 +48,7 @@ interface VesselDetailProps {
 export function VesselDetail({
   vesselId,
   onBack,
+  onNavigateToVoyages,
   onNavigateToPayments,
   onNavigateToBerths,
 }: VesselDetailProps) {
@@ -64,11 +66,11 @@ export function VesselDetail({
 
   const vessel = vessels.find((v) => v.id === vesselId);
   const voyage = voyages.find((v) => v.vesselId === vesselId && v.status === 'ACTIVE');
-  const fuel = fuelOperations.find((f) => f.vesselId === vesselId);
+  const fuel = fuelOperations.find((f) => f.voyageId === voyage?.id);
   const mfrPayment = paymentAccounts.find(
-    (p) => p.vesselId === vesselId && p.category === 'MANUFACTURER'
+    (p) => p.voyageId === voyage?.id && p.category === 'MANUFACTURER'
   );
-  const mfrQueue = manufacturerQueue.find((q) => q.vesselId === vesselId);
+  const mfrQueue = manufacturerQueue.find((q) => q.voyageId === voyage?.id);
   const vesselReadings = operationalReadings.filter((r) => r.vesselId === vesselId);
   const vesselDelays = delayEvents.filter((d) => d.vesselId === vesselId);
 
@@ -118,6 +120,13 @@ export function VesselDetail({
       </div>
     );
   }
+
+  if (!voyage) return <div className="bg-white border rounded-xl p-6 space-y-4">
+    <button onClick={onBack} className="text-[#0A7A3D] underline">Back to Vessels</button>
+    <h1 className="text-xl font-bold">{vessel.name}</h1>
+    <p>No active voyage is linked to this vessel. Create a voyage and select this vessel and its berth to enable readings, delays, fuel and activity tracking.</p>
+    <button onClick={onNavigateToVoyages} className="px-4 py-2 bg-[#0C9349] text-white rounded">Create a Voyage</button>
+  </div>;
 
   // Payment totals
   const pmtTotals = mfrPayment

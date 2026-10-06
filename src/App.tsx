@@ -117,6 +117,7 @@ function AppContent() {
               : 'flex-1 p-4 sm:p-6 lg:p-8 max-w-[1400px] w-full mx-auto'
           }
         >
+          {connectionInfo.errorMessage && <div role="alert" className="mb-4 p-3 border border-red-300 bg-red-50 text-red-800 rounded">{connectionInfo.errorMessage}</div>}
           {currentPage === 'dashboard-summary' && (
             <DashboardSummary
               onSelectVessel={handleSelectVessel}
@@ -152,6 +153,7 @@ function AppContent() {
             <VesselDetail
               vesselId={selectedVesselId}
               onBack={() => setCurrentPage('vessels')}
+              onNavigateToVoyages={() => setCurrentPage('voyages')}
               onNavigateToPayments={() => setCurrentPage('payments')}
               onNavigateToBerths={() => setCurrentPage('berths')}
             />

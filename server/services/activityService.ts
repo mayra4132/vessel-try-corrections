@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { withOperationalState } from '../operationalRepository';
 import { PoolConnection } from 'mysql2/promise';
 import { dbManager } from '../database';
 import {
@@ -11,7 +13,7 @@ import {
 } from '../../src/types/activity';
 
 // Initial in-memory demo data matching database/demo_seed.sql
-let memoryActivities: VesselActivity[] = [
+let demoActivities: VesselActivity[] = [
   // MV VIGOR 01
   {
     id: 'act-v01-01',
@@ -386,7 +388,7 @@ let memoryActivities: VesselActivity[] = [
   },
 ];
 
-let memoryDependencies: ActivityDependency[] = [
+let demoDependencies: ActivityDependency[] = [
   { id: 'dep-v01-01', activityId: 'act-v01-02', dependsOnActivityId: 'act-v01-01', requiredStatus: 'COMPLETED', createdAt: new Date().toISOString() },
   { id: 'dep-v01-02', activityId: 'act-v01-03', dependsOnActivityId: 'act-v01-02', requiredStatus: 'COMPLETED', createdAt: new Date().toISOString() },
   { id: 'dep-v01-03', activityId: 'act-v01-04', dependsOnActivityId: 'act-v01-03', requiredStatus: 'COMPLETED', createdAt: new Date().toISOString() },
@@ -403,7 +405,7 @@ let memoryDependencies: ActivityDependency[] = [
   { id: 'dep-v03-03', activityId: 'act-v03-04', dependsOnActivityId: 'act-v03-03', requiredStatus: 'COMPLETED', createdAt: new Date().toISOString() },
 ];
 
-let memoryEvents: VesselActivityEvent[] = [
+let demoEvents: VesselActivityEvent[] = [
   { id: 'evt-01', activityId: 'act-v01-01', vesselId: 'v-01', voyageId: 'voy-01', eventType: 'CREATED', newStatus: 'PLANNED', notes: 'Initial activity plan generated for rotation VY-2025-014', performedBy: 'usr-003', occurredAt: new Date(Date.now() - 14 * 3600000).toISOString() },
   { id: 'evt-02', activityId: 'act-v01-01', vesselId: 'v-01', voyageId: 'voy-01', eventType: 'STARTED', previousStatus: 'READY', newStatus: 'IN_PROGRESS', notes: 'Vessel made fast at Berth B01 quay', performedBy: 'usr-003', occurredAt: new Date(Date.now() - 12 * 3600000).toISOString() },
   { id: 'evt-03', activityId: 'act-v01-01', vesselId: 'v-01', voyageId: 'voy-01', eventType: 'COMPLETED', previousStatus: 'IN_PROGRESS', newStatus: 'COMPLETED', notes: 'Mooring lines tensioned and shore gangway deployed', performedBy: 'usr-003', occurredAt: new Date(Date.now() - 10 * 3600000).toISOString() },
@@ -425,57 +427,8 @@ export class ActivityService {
     executionMode?: ActivityExecutionMode;
     activityType?: string;
   }): Promise<VesselActivity[]> {
-    if (dbManager.isUsingMySQL()) {
-      try {
-        let sql = `
-          SELECT 
-            id, vessel_id as vesselId, voyage_id as voyageId, visit_id as visitId, berth_id as berthId,
-            activity_type as activityType, title, description, execution_mode as executionMode,
-            status, sequence_no as sequenceNo, priority, location,
-            planned_start as plannedStart, planned_end as plannedEnd,
-            forecast_start as forecastStart, forecast_end as forecastEnd,
-            actual_start as actualStart, actual_end as actualEnd,
-            stopped_at as stoppedAt, estimated_duration_minutes as estimatedDurationMinutes,
-            progress_pct as progressPct, blocks_next as blocksNext,
-            linked_entity_type as linkedEntityType, linked_entity_id as linkedEntityId,
-            stop_reason as stopReason, cancellation_reason as cancellationReason,
-            completion_notes as completionNotes, created_by as createdBy, updated_by as updatedBy,
-            created_at as createdAt, updated_at as updatedAt
-          FROM vessel_activities
-          WHERE 1=1
-        `;
-        const params: any[] = [];
-        if (filters?.vesselId) {
-          sql += ' AND vessel_id = ?';
-          params.push(filters.vesselId);
-        }
-        if (filters?.voyageId) {
-          sql += ' AND voyage_id = ?';
-          params.push(filters.voyageId);
-        }
-        if (filters?.status) {
-          sql += ' AND status = ?';
-          params.push(filters.status);
-        }
-        if (filters?.executionMode) {
-          sql += ' AND execution_mode = ?';
-          params.push(filters.executionMode);
-        }
-        if (filters?.activityType) {
-          sql += ' AND activity_type = ?';
-          params.push(filters.activityType);
-        }
-        sql += ' ORDER BY sequence_no ASC, planned_start ASC';
-
-        const rows = await dbManager.executeQuery<VesselActivity>(sql, params);
-        return await this.attachDependenciesAndEvents(rows);
-      } catch (err) {
-        console.warn('[ActivityService MySQL fallback to memory]:', err);
-      }
-    }
-
     // In-memory fallback
-    let results = [...memoryActivities];
+    let results = [...engineState().activities];
     if (filters?.vesselId) results = results.filter((a) => a.vesselId === filters.vesselId);
     if (filters?.voyageId) results = results.filter((a) => a.voyageId === filters.voyageId);
     if (filters?.status) results = results.filter((a) => a.status === filters.status);
@@ -504,16 +457,16 @@ export class ActivityService {
    */
   private async attachDependenciesAndEvents(activities: VesselActivity[]): Promise<VesselActivity[]> {
     return activities.map((act) => {
-      const deps = memoryDependencies
+      const deps = engineState().dependencies
         .filter((d) => d.activityId === act.id)
         .map((d) => {
-          const parent = memoryActivities.find((p) => p.id === d.dependsOnActivityId);
+          const parent = engineState().activities.find((p) => p.id === d.dependsOnActivityId);
           return {
             ...d,
             dependsOnActivityTitle: parent?.title,
           };
         });
-      const events = memoryEvents
+      const events = engineState().events
         .filter((e) => e.activityId === act.id)
         .sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime());
 
@@ -521,7 +474,7 @@ export class ActivityService {
       let blockerReason = act.blockerReason;
       if (act.status === 'BLOCKED' && !blockerReason) {
         const unsatisfied = deps.filter((d) => {
-          const p = memoryActivities.find((m) => m.id === d.dependsOnActivityId);
+          const p = engineState().activities.find((m) => m.id === d.dependsOnActivityId);
           return !p || (p.status !== 'COMPLETED' && p.status !== 'SKIPPED');
         });
         if (unsatisfied.length > 0) {
@@ -545,7 +498,7 @@ export class ActivityService {
     const id = data.id || `act-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
     const now = new Date().toISOString();
 
-    const existingVesselActs = memoryActivities.filter((a) => a.vesselId === data.vesselId);
+    const existingVesselActs = engineState().activities.filter((a) => a.vesselId === data.vesselId);
     const maxSeq = existingVesselActs.reduce((max, a) => Math.max(max, a.sequenceNo), 0);
 
     const newActivity: VesselActivity = {
@@ -576,7 +529,7 @@ export class ActivityService {
       updatedAt: now,
     };
 
-    memoryActivities.push(newActivity);
+    engineState().activities.push(newActivity);
 
     // Record CREATED event
     this.recordEvent({
@@ -592,7 +545,7 @@ export class ActivityService {
     // Evaluate dependencies if any provided
     if (data.dependencies && Array.isArray(data.dependencies)) {
       for (const dep of data.dependencies) {
-        memoryDependencies.push({
+        engineState().dependencies.push({
           id: `dep-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 5)}`,
           activityId: id,
           dependsOnActivityId: dep.dependsOnActivityId,
@@ -623,15 +576,15 @@ export class ActivityService {
     conflict?: { currentActivity: VesselActivity; message: string };
     updatedStage?: string;
   }> {
-    const act = memoryActivities.find((a) => a.id === activityId);
+    const act = engineState().activities.find((a) => a.id === activityId);
     if (!act) throw new Error(`Activity ${activityId} not found`);
 
     const now = options?.startedAt || new Date().toISOString();
 
     // Check dependencies
-    const actDeps = memoryDependencies.filter((d) => d.activityId === act.id);
+    const actDeps = engineState().dependencies.filter((d) => d.activityId === act.id);
     const unmet = actDeps.filter((d) => {
-      const parent = memoryActivities.find((p) => p.id === d.dependsOnActivityId);
+      const parent = engineState().activities.find((p) => p.id === d.dependsOnActivityId);
       return !parent || (parent.status !== 'COMPLETED' && parent.status !== 'SKIPPED');
     });
 
@@ -656,7 +609,7 @@ export class ActivityService {
 
     // PRIMARY CONCURRENCY CHECK (Requirement 6 & 7)
     if (act.executionMode === 'PRIMARY') {
-      const activePrimary = memoryActivities.find(
+      const activePrimary = engineState().activities.find(
         (a) => a.vesselId === act.vesselId && a.id !== act.id && a.executionMode === 'PRIMARY' && a.status === 'IN_PROGRESS'
       );
 
@@ -724,7 +677,7 @@ export class ActivityService {
     options: { reason: string; notes?: string },
     userEmail = 'ops.dispatcher@turkysgroup.co.tz'
   ): Promise<VesselActivity> {
-    const act = memoryActivities.find((a) => a.id === activityId);
+    const act = engineState().activities.find((a) => a.id === activityId);
     if (!act) throw new Error(`Activity ${activityId} not found`);
     if (!options.reason || !options.reason.trim()) {
       throw new Error('Stop reason is strictly required.');
@@ -763,7 +716,7 @@ export class ActivityService {
     options?: { notes?: string },
     userEmail = 'ops.dispatcher@turkysgroup.co.tz'
   ): Promise<VesselActivity> {
-    const act = memoryActivities.find((a) => a.id === activityId);
+    const act = engineState().activities.find((a) => a.id === activityId);
     if (!act) throw new Error(`Activity ${activityId} not found`);
     if (act.status !== 'STOPPED') throw new Error('Only STOPPED activities can be resumed.');
 
@@ -797,7 +750,7 @@ export class ActivityService {
     options?: { actualEnd?: string; completionNotes?: string },
     userEmail = 'ops.dispatcher@turkysgroup.co.tz'
   ): Promise<{ activity: VesselActivity; nextReadyActivities: VesselActivity[] }> {
-    const act = memoryActivities.find((a) => a.id === activityId);
+    const act = engineState().activities.find((a) => a.id === activityId);
     if (!act) throw new Error(`Activity ${activityId} not found`);
 
     const now = options?.actualEnd || new Date().toISOString();
@@ -828,7 +781,7 @@ export class ActivityService {
     // Sync berth if completed was unloading or berthing
     if (act.activityType === 'VIGOR_UNLOADING' || act.activityType === 'VIGOR_POST_UNLOAD') {
       // Check if any other primary activity at B01 is running
-      const anotherB01 = memoryActivities.find(
+      const anotherB01 = engineState().activities.find(
         (a) => a.berthId === 'B01' && a.id !== act.id && (a.status === 'IN_PROGRESS' || a.status === 'STOPPED')
       );
       if (!anotherB01) {
@@ -847,7 +800,7 @@ export class ActivityService {
     options: { reason: string; notes?: string },
     userEmail = 'ops.dispatcher@turkysgroup.co.tz'
   ): Promise<VesselActivity> {
-    const act = memoryActivities.find((a) => a.id === activityId);
+    const act = engineState().activities.find((a) => a.id === activityId);
     if (!act) throw new Error(`Activity ${activityId} not found`);
     if (!options.reason || !options.reason.trim()) {
       throw new Error('Cancellation reason is strictly required.');
@@ -884,7 +837,7 @@ export class ActivityService {
     options: { reason: string; notes?: string },
     userEmail = 'ops.dispatcher@turkysgroup.co.tz'
   ): Promise<VesselActivity> {
-    const act = memoryActivities.find((a) => a.id === activityId);
+    const act = engineState().activities.find((a) => a.id === activityId);
     if (!act) throw new Error(`Activity ${activityId} not found`);
     if (!options.reason || !options.reason.trim()) {
       throw new Error('Skip reason is strictly required.');
@@ -921,7 +874,7 @@ export class ActivityService {
     options?: { completionNotes?: string },
     userEmail = 'ops.dispatcher@turkysgroup.co.tz'
   ): Promise<{ completedActivity: VesselActivity; nextStartedActivity?: VesselActivity }> {
-    const current = memoryActivities.find((a) => a.id === currentActivityId);
+    const current = engineState().activities.find((a) => a.id === currentActivityId);
     if (!current) throw new Error(`Activity ${currentActivityId} not found`);
 
     const { activity: completed, nextReadyActivities } = await this.completeActivity(
@@ -931,7 +884,7 @@ export class ActivityService {
     );
 
     // Find the next eligible primary activity
-    const nextPrimary = memoryActivities
+    const nextPrimary = engineState().activities
       .filter((a) => a.vesselId === current.vesselId && a.id !== current.id && a.executionMode === 'PRIMARY')
       .filter((a) => a.status === 'READY' || (a.status === 'PLANNED' && a.sequenceNo > current.sequenceNo))
       .sort((a, b) => a.sequenceNo - b.sequenceNo)[0];
@@ -953,13 +906,13 @@ export class ActivityService {
     direction: 'UP' | 'DOWN',
     userEmail = 'ops.dispatcher@turkysgroup.co.tz'
   ): Promise<VesselActivity[]> {
-    const act = memoryActivities.find((a) => a.id === activityId);
+    const act = engineState().activities.find((a) => a.id === activityId);
     if (!act) throw new Error(`Activity ${activityId} not found`);
     if (act.status === 'COMPLETED' || act.status === 'IN_PROGRESS') {
       throw new Error('Cannot reorder completed or in-progress activities.');
     }
 
-    const vesselActs = memoryActivities
+    const vesselActs = engineState().activities
       .filter((a) => a.vesselId === act.vesselId && a.status !== 'COMPLETED')
       .sort((a, b) => a.sequenceNo - b.sequenceNo);
 
@@ -993,7 +946,7 @@ export class ActivityService {
    * Update Progress for an activity (e.g. from readings)
    */
   public async updateProgress(activityId: string, progressPct: number, userEmail = 'system'): Promise<VesselActivity> {
-    const act = memoryActivities.find((a) => a.id === activityId);
+    const act = engineState().activities.find((a) => a.id === activityId);
     if (!act) throw new Error(`Activity ${activityId} not found`);
 
     act.progressPct = Math.min(100, Math.max(0, Math.round(progressPct * 100) / 100));
@@ -1016,7 +969,7 @@ export class ActivityService {
    * Re-evaluates all dependencies for a vessel
    */
   public async evaluateDependenciesForVessel(vesselId: string): Promise<VesselActivity[]> {
-    const vesselActs = memoryActivities.filter((a) => a.vesselId === vesselId);
+    const vesselActs = engineState().activities.filter((a) => a.vesselId === vesselId);
     const readyActivities: VesselActivity[] = [];
 
     for (const act of vesselActs) {
@@ -1024,7 +977,7 @@ export class ActivityService {
         continue;
       }
 
-      const deps = memoryDependencies.filter((d) => d.activityId === act.id);
+      const deps = engineState().dependencies.filter((d) => d.activityId === act.id);
       if (deps.length === 0) {
         if (act.status === 'PLANNED') {
           act.status = 'READY';
@@ -1038,7 +991,7 @@ export class ActivityService {
       const blockers: string[] = [];
 
       for (const dep of deps) {
-        const parent = memoryActivities.find((p) => p.id === dep.dependsOnActivityId);
+        const parent = engineState().activities.find((p) => p.id === dep.dependsOnActivityId);
         if (!parent || (parent.status !== 'COMPLETED' && parent.status !== 'SKIPPED')) {
           allSatisfied = false;
           blockers.push(parent?.title || dep.dependsOnActivityId);
@@ -1103,7 +1056,7 @@ export class ActivityService {
    * Shift downstream forecast times
    */
   private shiftDownstreamForecasts(fromAct: VesselActivity, delayMinutes: number): void {
-    const downstream = memoryActivities.filter(
+    const downstream = engineState().activities.filter(
       (a) => a.vesselId === fromAct.vesselId && a.sequenceNo > fromAct.sequenceNo && a.status !== 'COMPLETED'
     );
     for (const d of downstream) {
@@ -1118,7 +1071,7 @@ export class ActivityService {
 
   private recordEvent(event: Omit<VesselActivityEvent, 'id' | 'occurredAt'> & { occurredAt?: string }): void {
     const id = `evt-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
-    memoryEvents.push({
+    engineState().events.push({
       ...event,
       id,
       occurredAt: event.occurredAt || new Date().toISOString(),
@@ -1126,4 +1079,37 @@ export class ActivityService {
   }
 }
 
-export const activityService = new ActivityService();
+
+const activityContext = new AsyncLocalStorage<{activities: VesselActivity[]; dependencies: ActivityDependency[]; events: VesselActivityEvent[]}>();
+function engineState() {
+  return activityContext.getStore() || {activities: demoActivities, dependencies: demoDependencies, events: demoEvents};
+}
+const engine = new ActivityService();
+export const activityService = new Proxy(engine, {
+  get(target, key) {
+    const method = Reflect.get(target, key);
+    if (typeof method !== 'function') return method;
+    return (...args: any[]) => {
+      if (!dbManager.isUsingMySQL()) return method.apply(target, args);
+      const write = !String(key).startsWith('get');
+      return withOperationalState(async (state) => {
+        const context = { activities: state.activities,
+          dependencies: state.activities.flatMap((a: VesselActivity) => a.dependencies || []),
+          events: state.activities.flatMap((a: VesselActivity) => a.events || []) };
+        return activityContext.run(context, async () => {
+          const result = await method.apply(target, args);
+          for (const activity of context.activities) {
+            activity.dependencies = context.dependencies.filter(d => d.activityId === activity.id);
+            activity.events = context.events.filter(e => e.activityId === activity.id);
+          }
+          const changed = result?.activity;
+          if (changed?.voyageId && result.updatedStage) {
+            const voyage = state.voyages.find((v: any) => v.id === changed.voyageId);
+            if (voyage) voyage.currentStage = result.updatedStage;
+          }
+          return result;
+        });
+      }, write);
+    };
+  },
+});
